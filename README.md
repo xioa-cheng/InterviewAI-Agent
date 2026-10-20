@@ -36,7 +36,8 @@
 │   ├── Dockerfile
 │   └── nginx.conf
 ├── docker-compose.yml
-└── .env                # DeepSeek API Key（勿提交）
+├── .env.example        # 配置模板（提交，供他人复制）
+└── .env                # 真实配置（勿提交，按模板自建）
 ```
 
 ## 部署方式
@@ -45,13 +46,19 @@
 
 ```bash
 # 1. 确保已安装 Docker Desktop 并启动
-# 2. 在项目根目录配置 .env（已包含 DEEPSEEK_API_KEY）
+# 2. 复制配置模板（Windows 用 copy 命令）
+cp .env.example .env
+# 3. 编辑 .env，至少填入 DEEPSEEK_API_KEY 和 SECRET_KEY
+#    （SECRET_KEY 随便填一串足够长的随机字符串即可）
+# 4. 启动
 docker compose up -d --build
 ```
 
 启动后：
 - 前端：http://localhost:5173
 - 后端 API 文档：http://localhost:8000/docs
+
+> 首次使用需先注册账号；若在 `.env` 里配置了 `ADMIN_EMAIL`，用该邮箱注册会自动成为管理员。
 
 ### 方式二：本地开发
 
@@ -69,7 +76,12 @@ npm install
 npm run dev
 ```
 
-## 环境变量（backend/.env）
+## 环境变量说明
+
+本项目有两份环境变量文件，用途不同：
+
+- **根目录 `.env`**：Docker Compose 部署时读取（模板见根目录 `.env.example`）。
+- **`backend/.env`**：本地开发（非 Docker）时后端直接读取（模板见 `backend/.env.example`）。
 
 | 变量 | 说明 |
 |---|---|
