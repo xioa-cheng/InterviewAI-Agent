@@ -1,0 +1,45 @@
+# Web 框架
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+
+# WebSocket
+websockets>=12.0
+
+# 数据库
+sqlalchemy[asyncio]>=2.0.30
+aiosqlite>=0.20.0
+asyncpg>=0.29.0
+
+# 缓存
+redis>=5.0.0
+
+# LangChain & LangGraph
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langgraph>=0.2.0
+
+# LLM
+openai>=1.40.0
+langchain-openai>=0.2.0
+
+# 认证
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.1.0
+
+# 文件解析（简历上传 Word/PDF）
+pypdf>=4.0.0
+python-docx>=1.1.0
+pymupdf>=1.24.0
+pytesseract>=0.3.10
+pillow>=10.0.0
+
+# 工具
+python-dotenv>=1.0.1
+loguru>=0.7.2
+
+# 向量库（RAG 题库检索）
+chromadb>=0.5.0
