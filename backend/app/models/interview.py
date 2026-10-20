@@ -8,7 +8,6 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
-    JSON,
     String,
     Text,
     Uuid,
@@ -16,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+from app.models.types import JSONType
 
 
 class Interview(Base):
@@ -57,14 +57,14 @@ class QAPair(Base):
     question_number = Column(Integer, nullable=False, default=1)
     question_type = Column(String(30))
     question_content = Column(Text, nullable=False)
-    question_context = Column(JSON, default=dict)
+    question_context = Column(JSONType, default=dict)
     answer_content = Column(Text)
     answer_audio_url = Column(String(500))
     answer_duration_seconds = Column(Integer)
     score = Column(Float)
-    strengths = Column(JSON, default=list)
-    weaknesses = Column(JSON, default=list)
-    suggestions = Column(JSON, default=list)
+    strengths = Column(JSONType, default=list)
+    weaknesses = Column(JSONType, default=list)
+    suggestions = Column(JSONType, default=list)
     model_answer = Column(Text)
     asked_at = Column(DateTime, default=datetime.utcnow)
     answered_at = Column(DateTime)

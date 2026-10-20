@@ -7,9 +7,11 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
+from app.api.websocket import manager
 from app.agent.evaluator.graph import run_evaluator_agent
 from app.agent.interviewer.graph import run_interviewer_agent
 from app.agent.skill_assessor.graph import run_skill_assessor
+from app.cache import cache
 from app.database import get_db
 from app.models.interview import Interview, QAPair
 from app.models.question_bank import SkillAssessment
@@ -18,7 +20,7 @@ from app.models.user import User
 
 router = APIRouter(prefix="/api/v1/interviews", tags=["interviews"])
 
-ALLOWED_INTERVIEW_TYPES = {"mixed", "technical", "behavioral", "project", "algorithm", "system_design"}
+ALLOWED_INTERVIEW_TYPES = {"mixed", "technical", "behavioral", "project", "algorithm", "system_design", "stress"}
 ALLOWED_DIFFICULTY = {"easy", "medium", "hard"}
 
 
@@ -55,6 +57,11 @@ async def list_interviews(user: User = Depends(get_current_user), db: AsyncSessi
 
 
 async def _build_history(db: AsyncSession, interview_id) -> list:
+    cache_key = f"interview:{interview_id}:history"
+    cached = await cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
     result = await db.execute(
         select(QAPair).where(QAPair.interview_id == interview_id).order_by(QAPair.question_number)
     )
@@ -70,6 +77,7 @@ async def _build_history(db: AsyncSession, interview_id) -> list:
                     "score": p.score,
                 }
             )
+    await cache.set_json(cache_key, history)
     return history
 
 
@@ -171,6 +179,7 @@ async def start_interview(data: dict, user: User = Depends(get_current_user), db
     )
     db.add(qa)
     await db.commit()
+    await manager.broadcast(str(interview.id), {"type": "started", "round": 1})
 
     return {
         "interview_id": str(interview.id),
@@ -209,6 +218,8 @@ async def submit_answer(interview_id: str, data: dict, user: User = Depends(get_
     if qa.answer_content:
         raise HTTPException(status_code=400, detail="当前问题已作答")
 
+    await manager.broadcast(str(iid), {"type": "evaluating", "round": qa.question_number})
+
     # 评估当前回答
     evaluation = await run_evaluator_agent(qa.question_content or "", qa.question_type or "behavioral", answer)
 
@@ -219,6 +230,11 @@ async def submit_answer(interview_id: str, data: dict, user: User = Depends(get_
     qa.suggestions = evaluation.get("suggestions") or []
     qa.model_answer = evaluation.get("model_answer")
     qa.answered_at = datetime.utcnow()
+
+    # 先把当前这轮答案 flush 进数据库（事务尚未提交），
+    # 这样下面读历史 / 算总分 / 做能力评估时能查到刚答的这一轮，
+    # 而不是等最后 commit 之后才落库、导致追问上下文漏掉最新回答。
+    await db.flush()
 
     completed = False
     next_question = None
@@ -254,6 +270,13 @@ async def submit_answer(interview_id: str, data: dict, user: User = Depends(get_
         next_question = result.get("current_question")
 
     await db.commit()
+    await cache.delete(f"interview:{iid}:history")
+    await manager.broadcast(
+        str(iid),
+        {"type": "evaluated", "round": qa.question_number, "score": qa.score, "completed": completed},
+    )
+    if completed:
+        await manager.broadcast(str(iid), {"type": "completed"})
 
     return {
         "evaluation": evaluation,
@@ -381,4 +404,5 @@ async def delete_interview(interview_id: str, user: User = Depends(get_current_u
     await db.execute(sa_delete(QAPair).where(QAPair.interview_id == iid))
     await db.execute(sa_delete(Interview).where(Interview.id == iid))
     await db.commit()
+    await cache.delete(f"interview:{iid}:history")
     return {"deleted": True}

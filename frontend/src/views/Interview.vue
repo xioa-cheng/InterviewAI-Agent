@@ -23,6 +23,7 @@
                   <a-option value="technical">技术</a-option>
                   <a-option value="behavioral">行为</a-option>
                   <a-option value="project">项目</a-option>
+                  <a-option value="stress">压力</a-option>
                 </a-select>
               </a-form-item>
             </a-col>
@@ -55,6 +56,7 @@
             <a-tag>{{ questionType }}</a-tag>
             <a-button size="mini" @click="speak(question)">🔊 朗读题目</a-button>
           </div>
+          <div v-if="wsStatus" class="ws-status">{{ wsStatus }}</div>
           <div class="question">{{ question }}</div>
           <a-textarea
             v-model="answer"
@@ -117,10 +119,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
-import client from '../api/client'
+import client, { TOKEN_KEY } from '../api/client'
 
 const router = useRouter()
 const route = useRoute()
@@ -163,6 +165,8 @@ const answer = ref('')
 const evaluation = ref<any>(null)
 const report = ref<any>(null)
 const listening = ref(false)
+const wsStatus = ref('')
+let ws: WebSocket | null = null
 
 async function start() {
   loading.value = true
@@ -177,6 +181,7 @@ async function start() {
     evaluation.value = null
     report.value = null
     phase.value = 'session'
+    openSocket(res.data.interview_id)
   } catch (e: any) {
     Message.error(e?.response?.data?.detail || '开始面试失败')
   } finally {
@@ -210,13 +215,55 @@ async function submit() {
 }
 
 function reset() {
+  closeSocket()
   phase.value = 'setup'
   answer.value = ''
   evaluation.value = null
   report.value = null
 }
 
+// —— WebSocket 实时事件推送（可选，失败静默降级，不影响主流程）——
+function openSocket(id: string) {
+  closeSocket()
+  try {
+    const token = localStorage.getItem(TOKEN_KEY)
+    if (!token) return
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    ws = new WebSocket(`${proto}://${location.host}/api/v1/ws/interviews/${id}?token=${encodeURIComponent(token)}`)
+    wsStatus.value = '实时状态：已连接'
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'evaluating') {
+          wsStatus.value = `面试官正在评估第 ${msg.round} 轮回答…`
+        } else if (msg.type === 'evaluated') {
+          wsStatus.value = msg.completed
+            ? `面试完成，综合评分 ${msg.score ?? '-'} 分`
+            : `第 ${msg.round} 轮评分：${msg.score ?? '-'} 分`
+        } else if (msg.type === 'completed') {
+          wsStatus.value = '面试结束'
+        }
+      } catch {
+        /* 忽略无法解析的消息 */
+      }
+    }
+    ws.onerror = () => { wsStatus.value = '' }
+    ws.onclose = () => { if (phase.value === 'session') wsStatus.value = '' }
+  } catch {
+    ws = null
+  }
+}
+
+function closeSocket() {
+  if (ws) {
+    try { ws.close() } catch { /* 忽略 */ }
+    ws = null
+  }
+  wsStatus.value = ''
+}
+
 onMounted(loadResumes)
+onUnmounted(closeSocket)
 
 function speak(text: string) {
   if (!('speechSynthesis' in window)) {
@@ -275,6 +322,11 @@ function listen() {
   display: flex;
   gap: 8px;
   margin-bottom: 16px;
+}
+.ws-status {
+  margin: -8px 0 12px;
+  font-size: 12px;
+  color: #86909c;
 }
 .question {
   font-size: 18px;

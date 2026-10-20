@@ -1,13 +1,16 @@
 """评估官 Agent（LangGraph）：对候选人回答进行评分与点评"""
 import logging
 
+from langchain_core.output_parsers import JsonOutputParser
 from langgraph.graph import END, StateGraph
 
 from app.agent.state import EvaluatorState
 from app.llm.client import agenerate_text
-from app.utils import clamp_score, parse_json
+from app.utils import clamp_score
 
 logger = logging.getLogger(__name__)
+
+_json_parser = JsonOutputParser()
 
 EVALUATION_PROMPT = """你是一位专业的面试评估官。请对下面的面试问答进行评估。
 
@@ -36,7 +39,7 @@ def create_evaluator_graph():
 
         try:
             content = await agenerate_text(prompt)
-            data = parse_json(content)
+            data = _json_parser.parse(content)
             state["score"] = clamp_score(data.get("score"), default=70.0)
             state["strengths"] = data.get("strengths") or []
             state["weaknesses"] = data.get("weaknesses") or []

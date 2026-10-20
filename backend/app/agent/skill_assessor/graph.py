@@ -1,13 +1,16 @@
 """能力评估 Agent（LangGraph）：对整场面试做多维度能力评分 + 总结"""
 import logging
 
+from langchain_core.output_parsers import JsonOutputParser
 from langgraph.graph import END, StateGraph
 
 from app.agent.state import SkillAssessorState
 from app.llm.client import agenerate_text
-from app.utils import clamp_score, parse_json
+from app.utils import clamp_score
 
 logger = logging.getLogger(__name__)
+
+_json_parser = JsonOutputParser()
 
 SKILL_PROMPT = """你是一位资深的面试评估专家。以下是候选人在「{position}」岗位面试中的完整问答记录与逐题得分：
 
@@ -56,7 +59,7 @@ def create_skill_assessor_graph():
 
         try:
             content = await agenerate_text(prompt)
-            data = parse_json(content)
+            data = _json_parser.parse(content)
             raw_scores = data.get("scores") or {}
             state["scores"] = {k: clamp_score(raw_scores.get(k), 60.0) for k in SKILL_KEYS}
             state["summary"] = data.get("summary") or ""

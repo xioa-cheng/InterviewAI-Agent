@@ -2,9 +2,10 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text, Uuid
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, Uuid
 
 from app.database import Base
+from app.models.types import JSONType
 
 
 class QuestionBank(Base):
@@ -16,9 +17,9 @@ class QuestionBank(Base):
     category = Column(String(50), index=True)
     difficulty = Column(String(20))
     industry = Column(String(50))
-    position_tags = Column(JSON, default=list)
+    position_tags = Column(JSONType, default=list)
     model_answer = Column(Text)
-    evaluation_criteria = Column(JSON, default=dict)
+    evaluation_criteria = Column(JSONType, default=dict)
     frequency = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 

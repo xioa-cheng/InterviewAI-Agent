@@ -1,14 +1,16 @@
 """面试官 Agent（LangGraph）：根据岗位/简历/历史问答生成下一道面试题"""
 import logging
 
+from langchain_core.output_parsers import JsonOutputParser
 from langgraph.graph import END, StateGraph
 
 from app.agent.state import InterviewerState
 from app.llm.client import agenerate_text
 from app.rag.retrieval import retrieve_question_references
-from app.utils import parse_json
 
 logger = logging.getLogger(__name__)
+
+_json_parser = JsonOutputParser()
 
 QUESTION_PROMPT = """你是一位资深技术面试官，正在为「{position}」岗位进行{interview_type}面试（难度：{difficulty}）。
 当前是第 {round} 轮（共 {total} 轮）。
@@ -16,7 +18,7 @@ QUESTION_PROMPT = """你是一位资深技术面试官，正在为「{position}�
 {history}
 {context}
 {question_bank}
-
+{style}
 请只输出一个 JSON 对象（不要输出任何其它文字），格式如下：
 {{"question": "你要问的面试问题", "question_type": "问题类型，取 technical / behavioral / project / algorithm / system_design 之一"}}
 
@@ -57,6 +59,14 @@ def create_interviewer_graph():
         except Exception as e:  # noqa: BLE001
             logger.warning(f"题库检索异常: {e}")
 
+        # 压力面试：注入更具压迫感的追问/质疑风格，考察抗压能力
+        style_text = ""
+        if interview_type == "stress":
+            style_text = (
+                "【压力面试】本轮采用压力面试风格：请连续追问、适当质疑候选人的回答，"
+                "抛出有挑战性的反问并施加时间压力，观察其抗压能力与临场反应。"
+            )
+
         prompt = QUESTION_PROMPT.format(
             position=position,
             interview_type=interview_type,
@@ -66,11 +76,12 @@ def create_interviewer_graph():
             history=history_text,
             context=context_text,
             question_bank=question_bank_text,
+            style=style_text,
         )
 
         try:
             content = await agenerate_text(prompt)
-            data = parse_json(content)
+            data = _json_parser.parse(content)
             state["current_question"] = data.get("question") or f"请介绍一下你应聘{position}的核心优势。"
             state["question_type"] = data.get("question_type") or "behavioral"
         except Exception as e:  # noqa: BLE001

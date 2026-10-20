@@ -2,10 +2,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, JSON, String, Uuid
+from sqlalchemy import Boolean, Column, DateTime, String, Uuid
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+from app.models.types import JSONType
 
 
 class User(Base):
@@ -19,7 +20,7 @@ class User(Base):
     target_position = Column(String(200))
     industry = Column(String(50))
     experience_level = Column(String(20))
-    preferences = Column(JSON, default=dict)
+    preferences = Column(JSONType, default=dict)
     role = Column(String(20), nullable=False, default="user", index=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

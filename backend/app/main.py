@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, interview, resume, users
+from app.api import auth, interview, resume, users, websocket
 from app.config import settings
 from app.database import init_db
 from app.rag.indexing import ensure_question_index, seed_question_bank
@@ -37,6 +37,7 @@ app.include_router(resume.router)
 app.include_router(interview.router)
 app.include_router(users.router)
 app.include_router(users.admin_router)
+app.include_router(websocket.router)
 
 
 @app.get("/")
