@@ -287,19 +287,17 @@ async def submit_answer(interview_id: str, data: dict, user: User = Depends(get_
     }
 
 
-@router.get("/{interview_id}/report")
-async def get_report(interview_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def build_report_data(db: AsyncSession, interview_id) -> dict:
+    """组装面试报告数据（不含鉴权，供 REST 端点与 MCP Server 共用）。"""
     try:
-        iid = uuid.UUID(interview_id)
+        iid = uuid.UUID(str(interview_id))
     except ValueError:
-        raise HTTPException(status_code=400, detail="无效的 interview_id")
+        return {"error": "无效的 interview_id"}
 
     result_row = await db.execute(select(Interview).where(Interview.id == iid))
     interview = result_row.scalar_one_or_none()
     if interview is None:
-        raise HTTPException(status_code=404, detail="面试不存在")
-    if interview.user_id != user.id:
-        raise HTTPException(status_code=403, detail="无权访问该面试")
+        return {"error": "面试不存在"}
 
     qa_result = await db.execute(
         select(QAPair).where(QAPair.interview_id == iid).order_by(QAPair.question_number)
@@ -350,6 +348,21 @@ async def get_report(interview_id: str, user: User = Depends(get_current_user), 
         "total_rounds": interview.total_rounds,
         "details": details,
     }
+
+
+@router.get("/{interview_id}/report")
+async def get_report(interview_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        iid = uuid.UUID(interview_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="无效的 interview_id")
+    result_row = await db.execute(select(Interview).where(Interview.id == iid))
+    interview = result_row.scalar_one_or_none()
+    if interview is None:
+        raise HTTPException(status_code=404, detail="面试不存在")
+    if interview.user_id != user.id:
+        raise HTTPException(status_code=403, detail="无权访问该面试")
+    return await build_report_data(db, interview_id)
 
 
 @router.get("/{interview_id}")

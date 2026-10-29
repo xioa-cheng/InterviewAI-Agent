@@ -22,6 +22,8 @@ class QuestionBank(Base):
     evaluation_criteria = Column(JSONType, default=dict)
     frequency = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    content_hash = Column(String(64), index=True)
 
 
 class PracticeRecord(Base):

@@ -1,7 +1,7 @@
 """通用工具函数"""
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
 
 def parse_json(text: str) -> dict:
@@ -25,8 +25,12 @@ def parse_json(text: str) -> dict:
     return {}
 
 
-def clamp_score(score: Any, default: float = 70.0) -> float:
-    """把分数约束到 0~100"""
+def clamp_score(score: Any, default: Optional[float] = None) -> Optional[float]:
+    """把分数约束到 0~100。
+
+    无法转换为数字时返回 default（默认 None），**不再静默兜底为 70**，
+    避免评估彻底失败时伪造分数污染报告与总分。
+    """
     try:
         s = float(score)
     except (TypeError, ValueError):

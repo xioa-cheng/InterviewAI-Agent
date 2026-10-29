@@ -2,13 +2,69 @@
   <div>
     <a-page-header title="🛠 用户管理" subtitle="查看和管理所有注册用户">
       <template #extra>
-        <a-button type="primary" @click="openCreate">新建用户</a-button>
+        <a-space>
+          <a-button @click="loadList" :loading="loading">
+            <template #icon><icon-refresh /></template>刷新
+          </a-button>
+          <a-button type="primary" @click="openCreate">新建用户</a-button>
+        </a-space>
       </template>
     </a-page-header>
 
+    <!-- 统计卡片 -->
+    <a-row :gutter="16" class="stats">
+      <a-col :xs="12" :sm="12" :md="6"><a-card><a-statistic title="总用户" :value="stats.total" /></a-card></a-col>
+      <a-col :xs="12" :sm="12" :md="6"><a-card><a-statistic title="活跃用户" :value="stats.active" /></a-card></a-col>
+      <a-col :xs="12" :sm="12" :md="6"><a-card><a-statistic title="管理员" :value="stats.admins" /></a-card></a-col>
+      <a-col :xs="12" :sm="12" :md="6"><a-card><a-statistic title="近 7 天新增" :value="stats.recent" /></a-card></a-col>
+    </a-row>
+
+    <!-- 工具栏：搜索 + 筛选 -->
+    <a-card class="toolbar">
+      <a-space wrap>
+        <a-input
+          v-model="searchText"
+          placeholder="搜索用户名 / 邮箱"
+          allow-clear
+          style="width: 240px"
+        >
+          <template #prefix><icon-search /></template>
+        </a-input>
+        <a-select v-model="roleFilter" style="width: 140px">
+          <a-option value="all">全部角色</a-option>
+          <a-option value="user">普通用户</a-option>
+          <a-option value="admin">管理员</a-option>
+        </a-select>
+        <a-select v-model="statusFilter" style="width: 140px">
+          <a-option value="all">全部状态</a-option>
+          <a-option value="active">已启用</a-option>
+          <a-option value="inactive">已禁用</a-option>
+        </a-select>
+        <a-button @click="resetFilters">重置</a-button>
+      </a-space>
+    </a-card>
+
     <a-card class="card">
       <a-spin :loading="loading">
-        <a-table :data="list" :columns="columns" :pagination="false" row-key="id" />
+        <a-table
+          :data="pagedData"
+          :columns="columns"
+          :pagination="false"
+          row-key="id"
+          :scroll="{ x: 1080 }"
+          :bordered="false"
+        />
+        <div class="pager">
+          <a-pagination
+            :total="filteredList.length"
+            :current="current"
+            :page-size="pageSize"
+            show-total
+            show-page-size
+            @change="onPageChange"
+            @page-size-change="onPageSizeChange"
+          />
+        </div>
       </a-spin>
     </a-card>
 
@@ -84,7 +140,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { Button, Message, Modal, Tag } from '@arco-design/web-vue'
 import client from '../api/client'
 
@@ -95,6 +151,13 @@ const saving = ref(false)
 const showCreate = ref(false)
 const showEdit = ref(false)
 const showReset = ref(false)
+
+// 搜索 / 筛选 / 分页
+const searchText = ref('')
+const roleFilter = ref<'all' | 'user' | 'admin'>('all')
+const statusFilter = ref<'all' | 'active' | 'inactive'>('all')
+const pageSize = ref(10)
+const current = ref(1)
 
 const createForm = reactive({ username: '', email: '', password: '', role: 'user', full_name: '' })
 const editForm = reactive({
@@ -108,10 +171,60 @@ const editForm = reactive({
 })
 const resetForm = reactive({ id: '', username: '', new_password: '' })
 
+// 统计
+const stats = computed(() => {
+  const all = list.value
+  const now = Date.now()
+  const weekAgo = now - 7 * 24 * 3600 * 1000
+  return {
+    total: all.length,
+    active: all.filter((u) => u.is_active).length,
+    admins: all.filter((u) => u.role === 'admin').length,
+    recent: all.filter((u) => u.created_at && new Date(u.created_at).getTime() >= weekAgo).length,
+  }
+})
+
+// 前端过滤
+const filteredList = computed(() => {
+  const kw = searchText.value.trim().toLowerCase()
+  return list.value.filter((u) => {
+    if (kw && !(u.username.toLowerCase().includes(kw) || u.email.toLowerCase().includes(kw))) return false
+    if (roleFilter.value !== 'all' && u.role !== roleFilter.value) return false
+    if (statusFilter.value === 'active' && !u.is_active) return false
+    if (statusFilter.value === 'inactive' && u.is_active) return false
+    return true
+  })
+})
+
+const pagedData = computed(() => {
+  const start = (current.value - 1) * pageSize.value
+  return filteredList.value.slice(start, start + pageSize.value)
+})
+
+// 过滤条件变化时回到第一页
+watch([filteredList, pageSize], () => {
+  current.value = 1
+})
+
+function onPageChange(p: number) {
+  current.value = p
+}
+function onPageSizeChange(s: number) {
+  pageSize.value = s
+}
+
+function resetFilters() {
+  searchText.value = ''
+  roleFilter.value = 'all'
+  statusFilter.value = 'all'
+}
+
 const columns = [
-  { title: '用户名', dataIndex: 'username' },
-  { title: '邮箱', dataIndex: 'email' },
-  { title: '姓名', render: ({ record }: any) => record.full_name || '-' },
+  { title: '用户名', dataIndex: 'username', width: 130 },
+  { title: '邮箱', dataIndex: 'email', width: 200 },
+  { title: '姓名', width: 110, render: ({ record }: any) => record.full_name || '-' },
+  { title: '目标岗位', width: 150, render: ({ record }: any) => record.target_position || '-' },
+  { title: '经验', width: 90, render: ({ record }: any) => record.experience_level || '-' },
   {
     title: '角色',
     width: 90,
@@ -129,9 +242,11 @@ const columns = [
         : h(Tag, { color: 'orange' }, () => '禁用'),
   },
   { title: '注册时间', width: 160, render: ({ record }: any) => formatTime(record.created_at) },
+  { title: '更新时间', width: 160, render: ({ record }: any) => formatTime(record.updated_at) },
   {
     title: '操作',
-    width: 230,
+    width: 220,
+    fixed: 'right',
     render: ({ record }: any) =>
       h('span', [
         h(Button, { type: 'text', size: 'small', onClick: () => openEdit(record) }, () => '编辑'),
@@ -273,7 +388,7 @@ function delUser(record: any) {
 }
 
 function formatTime(t: string) {
-  if (!t) return ''
+  if (!t) return '-'
   const d = new Date(t)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
@@ -283,7 +398,18 @@ onMounted(loadList)
 </script>
 
 <style scoped>
+.stats {
+  margin-bottom: 16px;
+}
+.toolbar {
+  margin-bottom: 16px;
+}
 .card {
   min-height: 200px;
+}
+.pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 </style>

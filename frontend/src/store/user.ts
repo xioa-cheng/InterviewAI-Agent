@@ -16,9 +16,19 @@ interface User {
   created_at?: string
 }
 
+// 「记住我」：勾选 → 持久化到 localStorage（跨浏览器重启保留）；
+// 不勾选 → 仅存 sessionStorage（关闭标签页即失效）。两处都读，兼容历史数据。
+function pickStorage(persistent: boolean): Storage {
+  try {
+    return persistent ? localStorage : sessionStorage
+  } catch {
+    return localStorage
+  }
+}
+
 function loadToken(): string {
   try {
-    return localStorage.getItem(TOKEN_KEY) || ''
+    return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || ''
   } catch {
     return ''
   }
@@ -26,19 +36,24 @@ function loadToken(): string {
 
 function loadUser(): User | null {
   try {
-    const raw = localStorage.getItem(USER_KEY)
+    const raw = localStorage.getItem(USER_KEY) || sessionStorage.getItem(USER_KEY)
     return raw ? (JSON.parse(raw) as User) : null
   } catch {
     return null
   }
 }
 
-function saveAuth(token: string, user: User) {
+function saveAuth(token: string, user: User, persistent = true) {
   try {
-    localStorage.setItem(TOKEN_KEY, token)
-    localStorage.setItem(USER_KEY, JSON.stringify(user))
+    const target = pickStorage(persistent)
+    const other: Storage = persistent ? sessionStorage : localStorage
+    target.setItem(TOKEN_KEY, token)
+    target.setItem(USER_KEY, JSON.stringify(user))
+    // 清掉另一种存储里的旧登录态，避免互相污染
+    other.removeItem(TOKEN_KEY)
+    other.removeItem(USER_KEY)
   } catch {
-    /* 忽略：无痕/禁用 localStorage 时登录态仅存内存 */
+    /* 忽略：无痕/禁用存储时登录态仅存内存 */
   }
 }
 
@@ -46,6 +61,8 @@ function clearAuth() {
   try {
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(USER_KEY)
+    sessionStorage.removeItem(TOKEN_KEY)
+    sessionStorage.removeItem(USER_KEY)
   } catch {
     /* 忽略 */
   }
@@ -62,18 +79,21 @@ export const useUserStore = defineStore('user', {
     displayName: (state) => state.user?.full_name || state.user?.username || state.user?.email || '',
   },
   actions: {
-    setAuth(token: string, user: User) {
+    setAuth(token: string, user: User, persistent = true) {
       this.token = token
       this.user = user
-      saveAuth(token, user)
+      saveAuth(token, user, persistent)
     },
-    async login(email: string, password: string) {
+    async login(email: string, password: string, persistent = true) {
       const res = await client.post('/auth/login', { email, password })
-      this.setAuth(res.data.token, res.data.user)
+      this.setAuth(res.data.token, res.data.user, persistent)
     },
-    async register(payload: { username: string; email: string; password: string }) {
+    async register(
+      payload: { username: string; email: string; password: string },
+      persistent = true,
+    ) {
       const res = await client.post('/auth/register', payload)
-      this.setAuth(res.data.token, res.data.user)
+      this.setAuth(res.data.token, res.data.user, persistent)
     },
     logout() {
       this.token = ''

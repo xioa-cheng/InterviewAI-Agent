@@ -26,6 +26,10 @@ langgraph>=0.2.0
 openai>=1.40.0
 langchain-openai>=0.2.0
 
+# 工具调用 / MCP 集成
+mcp>=1.2.0
+langchain-mcp-adapters>=0.0.9
+
 # 认证
 python-jose[cryptography]>=3.3.0
 bcrypt>=4.1.0

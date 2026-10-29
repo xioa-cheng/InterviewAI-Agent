@@ -5,10 +5,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, interview, resume, users, websocket
+from app.api import auth, interview, questions, resume, users, websocket, stream
 from app.config import settings
 from app.database import init_db
-from app.rag.indexing import ensure_question_index, seed_question_bank
+from app.rag.indexing import ensure_question_index, prune_orphan_vectors, seed_question_bank
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,6 +19,7 @@ async def lifespan(app: FastAPI):
     # RAG：预置题库 + 建立向量索引（各自优雅降级，失败不影响启动）
     await seed_question_bank()
     await ensure_question_index()
+    await prune_orphan_vectors()  # 一致性校验：清理孤儿向量
     yield
 
 
@@ -37,7 +38,9 @@ app.include_router(resume.router)
 app.include_router(interview.router)
 app.include_router(users.router)
 app.include_router(users.admin_router)
+app.include_router(questions.router)
 app.include_router(websocket.router)
+app.include_router(stream.router)
 
 
 @app.get("/")

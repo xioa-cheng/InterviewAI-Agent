@@ -23,6 +23,7 @@ class EvaluatorState(TypedDict, total=False):
     question: str
     question_type: str
     answer: str
+    rubric: Optional[str]
     score: Optional[float]
     strengths: List[str]
     weaknesses: List[str]

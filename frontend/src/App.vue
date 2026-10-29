@@ -1,11 +1,11 @@
 <template>
-  <!-- 登录页全屏独占，不显示侧边栏 -->
-  <router-view v-if="isLoginPage" />
+  <!-- 登录页 / 落地页全屏独占，不显示侧边栏 -->
+  <router-view v-if="isFullPage" />
   <a-layout v-else class="layout">
     <a-layout-sider :width="210" breakpoint="lg" collapsible class="sider">
       <div class="logo">🎯 InterviewAI</div>
       <a-menu :selected-keys="[activeKey]" @menu-item-click="onMenuClick">
-        <a-menu-item key="/">🎯 面试模拟</a-menu-item>
+        <a-menu-item key="/interview">🎯 面试模拟</a-menu-item>
         <a-menu-item key="/resume">📄 简历管理</a-menu-item>
         <a-menu-item key="/history">📊 历史记录</a-menu-item>
         <a-menu-item key="/profile">👤 个人资料</a-menu-item>
@@ -34,7 +34,7 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
-const isLoginPage = computed(() => route.name === 'login')
+const isFullPage = computed(() => route.name === 'login' || route.name === 'landing')
 
 const activeKey = computed(() => {
   const p = route.path
@@ -43,7 +43,8 @@ const activeKey = computed(() => {
   if (p.startsWith('/history')) return '/history'
   if (p.startsWith('/profile')) return '/profile'
   if (p.startsWith('/admin')) return '/admin/users'
-  return '/'
+  if (p.startsWith('/interview')) return '/interview'
+  return '/interview'
 })
 
 function onMenuClick(key: string) {

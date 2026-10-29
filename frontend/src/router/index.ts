@@ -11,6 +11,11 @@ const router = createRouter({
     },
     {
       path: '/',
+      name: 'landing',
+      component: () => import('../views/Landing.vue'),
+    },
+    {
+      path: '/interview',
       name: 'interview',
       component: () => import('../views/Interview.vue'),
       meta: { requiresAuth: true },

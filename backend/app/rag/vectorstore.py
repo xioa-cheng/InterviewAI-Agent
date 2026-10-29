@@ -9,6 +9,12 @@ logger = logging.getLogger(__name__)
 _vector_store = None
 
 
+def clear_vector_store_cache():
+    """重置向量库单例，使下次访问重新加载 PersistentClient（重建索引后可选调用）。"""
+    global _vector_store
+    _vector_store = None
+
+
 def get_vector_store():
     """懒加载 ChromaDB 持久化客户端；失败时返回 None（RAG 禁用）"""
     global _vector_store

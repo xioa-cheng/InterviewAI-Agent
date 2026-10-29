@@ -42,6 +42,17 @@ def _ensure_role_column(sync_conn) -> None:
         )
 
 
+def _ensure_question_bank_columns(sync_conn) -> None:
+    """无迁移框架：老库 question_bank 表缺 updated_at / content_hash 时自动补列。"""
+    from sqlalchemy import inspect, text
+
+    cols = [c["name"] for c in inspect(sync_conn).get_columns("question_bank")]
+    if "updated_at" not in cols:
+        sync_conn.execute(text("ALTER TABLE question_bank ADD COLUMN updated_at TIMESTAMP"))
+    if "content_hash" not in cols:
+        sync_conn.execute(text("ALTER TABLE question_bank ADD COLUMN content_hash VARCHAR(64)"))
+
+
 def _ensure_admin_role(sync_conn) -> None:
     """启动时把 ADMIN_EMAIL 对应账号自动提升为管理员。"""
     if not settings.ADMIN_EMAIL:
@@ -61,4 +72,5 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_ensure_role_column)
+        await conn.run_sync(_ensure_question_bank_columns)
         await conn.run_sync(_ensure_admin_role)

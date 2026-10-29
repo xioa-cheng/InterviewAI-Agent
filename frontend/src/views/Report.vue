@@ -148,7 +148,7 @@ function handleResize() {
 }
 
 function goBack() {
-  router.push('/')
+  router.push('/interview')
 }
 </script>
 

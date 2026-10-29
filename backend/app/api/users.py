@@ -212,3 +212,18 @@ async def delete_user(
     await db.execute(delete(User).where(User.id == uid))
     await db.commit()
     return {"detail": "用户已删除"}
+
+
+@admin_router.post("/reindex", tags=["admin"])
+async def reindex_question_bank(admin: User = Depends(require_admin)):
+    """强制重建题库向量索引（新增/修改题目后手动触发）。"""
+    from app.rag.indexing import reindex_all
+    from app.rag.retrieval import clear_questions_cache as clear_retrieval_cache
+
+    try:
+        n = await reindex_all()
+        # 同时刷新检索侧题目缓存，确保出题/评分立即使用新题库（reindex_all 内部也会清，这里双保险）
+        clear_retrieval_cache()
+        return {"indexed": n}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"重建索引失败: {e}")
