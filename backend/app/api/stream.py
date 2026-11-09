@@ -13,39 +13,35 @@
   彻底失败则标记为 evaluation_failed、score 存 None（绝不伪造 70 分）。
 - 关键节点通过 WebSocket ConnectionManager 广播事件（started / evaluating / done /
   completed），使 WebSocket 在 SSE 流程下也真实可用。
-- 复用 interview 模块的落库辅助函数，保证与 REST 端点数据一致。
+- **编排（写库 / flush / 轮次推进 / 收尾能力评估 / 缓存失效）统一由
+  ``app.orchestrator.InterviewOrchestrator`` 负责**，与 REST、MCP 共用同一份逻辑；
+  本模块只保留「必须写在生成器体内」的流式循环。
 - 每个请求内部用独立的 AsyncSessionLocal 管理事务，避免依赖注入会话在流式期间被回收。
 """
 import logging
 import re
 import uuid
-from datetime import datetime
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
-from app.api.interview import (  # 复用落库辅助逻辑，保持与 REST 端点一致
-    ALLOWED_DIFFICULTY,
-    ALLOWED_INTERVIEW_TYPES,
-    _build_history,
-    _get_resume_context,
-    _run_skill_assessment,
-    _update_overall,
-)
 from app.api.websocket import manager
 from app.agent.evaluator.graph import run_evaluator_agent_stream
-from app.agent.interviewer.graph import run_interviewer_agent, run_interviewer_agent_stream
+from app.agent.interviewer.graph import run_interviewer_agent_stream
 from app.database import AsyncSessionLocal
 from app.llm.client import agenerate_structured
-from app.models.interview import Interview, QAPair
-from app.models.resume import Resume
 from app.models.user import User
-from app.rag.retrieval import record_question_used
-from app.utils import clamp_score
+from app.orchestrator.contracts import (
+    DEFAULT_QUESTION_TYPE,
+    EvaluationOut,
+    QuestionOut,
+    validate_start_params,
+)
+from app.orchestrator.errors import OrchestrationError
+from app.orchestrator.service import InterviewOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +58,10 @@ def _sse(event: dict) -> str:
     import json
 
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def _orchestrator(db: AsyncSession) -> InterviewOrchestrator:
+    return InterviewOrchestrator(db, broadcaster=manager.broadcast)
 
 
 # ---------------------------------------------------------------------------
@@ -83,82 +83,49 @@ def _strip_header(buffer: str) -> str:
 
 @router.post("/start")
 async def stream_start(data: dict, user: User = Depends(get_current_user)):
-    # —— 参数校验（与 REST /start 一致）——
-    interview_type = data.get("interview_type", "mixed")
-    position_name = data.get("position_name", "后端开发工程师") or "后端开发工程师"
-    difficulty_level = data.get("difficulty_level", "medium")
-    if interview_type not in ALLOWED_INTERVIEW_TYPES:
-        raise HTTPException(status_code=400, detail="无效的面试类型")
-    if difficulty_level not in ALLOWED_DIFFICULTY:
-        raise HTTPException(status_code=400, detail="无效的难度")
-    if len(position_name) > 200:
-        raise HTTPException(status_code=400, detail="岗位名称过长")
-    try:
-        total_rounds = int(data.get("total_rounds", 5))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="total_rounds 必须是整数")
-    total_rounds = max(1, min(10, total_rounds))
-
-    resume_id = data.get("resume_id")
+    # —— 参数校验（与 REST /start 共用 validate_start_params）——
+    error, params = validate_start_params(data)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
 
     async def event_gen() -> AsyncGenerator[str, None]:
-        question_type = "behavioral"
+        question_type = DEFAULT_QUESTION_TYPE
         question_text = ""
         try:
             async with AsyncSessionLocal() as db:
+                orch = _orchestrator(db)
                 # 解析简历上下文（与 REST /start 一致）
-                resume = None
-                if resume_id:
-                    try:
-                        rid = uuid.UUID(str(resume_id))
-                        resume = (
-                            await db.execute(select(Resume).where(Resume.id == rid, Resume.user_id == user.id))
-                        ).scalar_one_or_none()
-                    except ValueError:
-                        resume = None
-                if resume is None:
-                    resume = (
-                        await db.execute(
-                            select(Resume)
-                            .where(Resume.user_id == user.id)
-                            .order_by(Resume.created_at.desc())
-                            .limit(1)
-                        )
-                    ).scalar_one_or_none()
+                resume = await orch.resolve_resume(user.id, params.resume_id)
                 context = resume.content if resume and resume.content else ""
 
-                interview = Interview(
+                interview = await orch.create_interview(
                     user_id=user.id,
                     resume_id=resume.id if resume else None,
-                    interview_type=interview_type,
-                    position_name=position_name,
-                    difficulty_level=difficulty_level,
-                    total_rounds=total_rounds,
-                    current_round=1,
-                    status="ongoing",
+                    interview_type=params.interview_type,
+                    position_name=params.position_name,
+                    difficulty_level=params.difficulty_level,
+                    total_rounds=params.total_rounds,
                 )
-                db.add(interview)
-                await db.flush()
                 interview_id = str(interview.id)
 
-                yield _sse({"type": "meta", "interview_id": interview_id, "current_round": 1, "total_rounds": total_rounds})
-                await manager.broadcast(interview_id, {"type": "started", "round": 1})
+                yield _sse(
+                    {
+                        "type": "meta",
+                        "interview_id": interview_id,
+                        "current_round": 1,
+                        "total_rounds": params.total_rounds,
+                    }
+                )
+                await orch.notify_started(interview.id, 1)
 
-                # 走真正的面试官 ReAct Agent（检索题库 + 查简历），逐 token 流式输出
+                # 走真正的面试官 ReAct Agent（检索题库 + 查简历），逐 token 流式输出。
+                # 入参与非流式路径同源（orch.interviewer_params），保证两条路径不漂移。
                 buffer = ""
                 sent = 0
                 header_done = False
 
                 async for tok in run_interviewer_agent_stream(
-                    interview_id=interview_id,
-                    user_id=str(user.id),
-                    interview_type=interview_type,
-                    position_name=position_name,
-                    difficulty_level=difficulty_level,
-                    current_round=1,
-                    total_rounds=total_rounds,
-                    history=[],
-                    context=context,
+                    **orch.interviewer_params(interview, round_no=1, history=[], context=context)
                 ):
                     buffer += tok
                     if not header_done:
@@ -177,17 +144,12 @@ async def stream_start(data: dict, user: User = Depends(get_current_user)):
 
                 question_text = _strip_header(buffer).strip()
                 if not question_text:
-                    question_text = f"请介绍一下你自己，以及你应聘{position_name}的核心优势。"
-                    question_type = "behavioral"
+                    question_text = f"请介绍一下你自己，以及你应聘{params.position_name}的核心优势。"
+                    question_type = DEFAULT_QUESTION_TYPE
 
-                qa = QAPair(
-                    interview_id=interview.id,
-                    question_number=1,
-                    question_type=question_type,
-                    question_content=question_text,
+                await orch.persist_question(
+                    interview, QuestionOut(question=question_text, question_type=question_type), 1
                 )
-                db.add(qa)
-                await record_question_used(question_text)
                 await db.commit()
 
             yield _sse({"type": "done", "question": question_text, "question_type": question_type})
@@ -259,28 +221,16 @@ async def stream_answer(data: dict, user: User = Depends(get_current_user)):
     async def event_gen() -> AsyncGenerator[str, None]:
         try:
             async with AsyncSessionLocal() as db:
-                interview = (
-                    await db.execute(select(Interview).where(Interview.id == iid))
-                ).scalar_one_or_none()
-                if interview is None or interview.user_id != user.id:
-                    yield _sse({"type": "error", "message": "面试不存在或无权访问"})
+                orch = _orchestrator(db)
+                try:
+                    pending = await orch.load_pending_turn(iid, user_id=user.id)
+                except OrchestrationError as e:
+                    yield _sse({"type": "error", "message": e.message})
                     return
 
-                qa_result = await db.execute(
-                    select(QAPair)
-                    .where(QAPair.interview_id == iid)
-                    .order_by(QAPair.question_number.desc())
-                    .limit(1)
-                )
-                qa = qa_result.scalar_one_or_none()
-                if qa is None:
-                    yield _sse({"type": "error", "message": "当前没有待回答的问题"})
-                    return
-                if qa.answer_content:
-                    yield _sse({"type": "error", "message": "当前问题已作答"})
-                    return
-
-                await manager.broadcast(str(iid), {"type": "evaluating", "round": qa.question_number})
+                qa = pending.qa
+                interview = pending.interview
+                await orch.notify_evaluating(iid, pending.round_no)
 
                 # 走真正的评估官 ReAct Agent（取 rubric + 可选验证代码），逐 token 流式输出评估
                 buffer = ""
@@ -296,7 +246,7 @@ async def stream_answer(data: dict, user: User = Depends(get_current_user)):
                     return ""
 
                 async for tok in run_evaluator_agent_stream(
-                    qa.question_content or "", qa.question_type or "behavioral", answer
+                    qa.question_content or "", qa.question_type or DEFAULT_QUESTION_TYPE, answer
                 ):
                     buffer += tok
                     chunk = await flush_tokens()
@@ -313,7 +263,7 @@ async def stream_answer(data: dict, user: User = Depends(get_current_user)):
 
                         sdata = await agenerate_structured(_eval_structured_prompt(qa, answer), EvaluationOutput)
                         if sdata:
-                            score = clamp_score(sdata.get("score"))
+                            score = sdata.get("score")
                             strengths = sdata.get("strengths") or []
                             weaknesses = sdata.get("weaknesses") or []
                             suggestions = sdata.get("suggestions") or []
@@ -322,79 +272,38 @@ async def stream_answer(data: dict, user: User = Depends(get_current_user)):
                         logger.error(f"评估兜底失败: {e}")
 
                 # 解析与结构化兜底均失败：诚实地标记为「评分未完成」，绝不伪造 70 分污染数据
-                evaluation_failed = False
-                if score is None:
-                    evaluation_failed = True
-                else:
-                    score = clamp_score(score)
-
-                qa.answer_content = answer
-                qa.score = score
-                qa.strengths = strengths
-                qa.weaknesses = weaknesses
-                qa.suggestions = suggestions
-                qa.model_answer = model_answer
-                qa.answered_at = datetime.utcnow()
-                await db.flush()
-
-                completed = False
-                next_question = None
-                if qa.question_number >= interview.total_rounds:
-                    interview.status = "completed"
-                    interview.ended_at = datetime.utcnow()
-                    completed = True
-                    await _update_overall(db, interview)
-                    await _run_skill_assessment(db, interview)
-                else:
-                    history = await _build_history(db, iid)
-                    context = await _get_resume_context(db, interview)
-                    # 下一题用结构化生成（一次性返回，前端直接展示），保证题型准确
-                    result = await run_interviewer_agent(
-                        interview_id=str(iid),
-                        user_id=str(interview.user_id),
-                        interview_type=interview.interview_type,
-                        position_name=interview.position_name,
-                        difficulty_level=interview.difficulty_level,
-                        current_round=qa.question_number + 1,
-                        total_rounds=interview.total_rounds,
-                        history=history,
-                        context=context,
-                    )
-                    ntype = result.get("question_type") or "behavioral"
-                    ntext = result.get("current_question") or ""
-                    next_q = QAPair(
-                        interview_id=iid,
-                        question_number=qa.question_number + 1,
-                        question_type=ntype,
-                        question_content=ntext,
-                    )
-                    db.add(next_q)
-                    interview.current_round = qa.question_number + 1
-                    next_question = ntext
-                    await record_question_used(ntext)
-
-                await db.commit()
-
-                await manager.broadcast(
-                    str(iid),
-                    {"type": "evaluated", "round": qa.question_number, "score": score, "completed": completed},
+                evaluation = EvaluationOut(
+                    score=score,
+                    strengths=strengths,
+                    weaknesses=weaknesses,
+                    suggestions=suggestions,
+                    model_answer=model_answer,
+                    evaluation_failed=score is None,
                 )
+
+                # —— 以下为编排层职责：写库 + flush + 轮次推进 + 收尾 + 提交 + 缓存失效 ——
+                await orch.record_evaluation(pending, answer, evaluation)
+                outcome = await orch.advance(pending)
+                await orch.commit(iid)
+
+                completed = outcome.completed
+                await orch.notify_evaluated(iid, pending.round_no, qa.score, completed)
                 if completed:
-                    await manager.broadcast(str(iid), {"type": "completed"})
+                    await orch.notify_completed(iid)
 
                 yield _sse(
                     {
                         "type": "done",
-                        "score": score,
-                        "strengths": strengths,
-                        "weaknesses": weaknesses,
-                        "suggestions": suggestions,
-                        "model_answer": model_answer,
-                        "evaluation_failed": evaluation_failed,
+                        "score": evaluation.score,
+                        "strengths": evaluation.strengths,
+                        "weaknesses": evaluation.weaknesses,
+                        "suggestions": evaluation.suggestions,
+                        "model_answer": evaluation.model_answer,
+                        "evaluation_failed": evaluation.evaluation_failed,
                         "completed": completed,
                         "current_round": interview.current_round,
                         "total_rounds": interview.total_rounds,
-                        "next_question": next_question,
+                        "next_question": outcome.next_question,
                     }
                 )
         except Exception as e:  # noqa: BLE001

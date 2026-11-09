@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     DEEPSEEK_MODEL: str = "deepseek-chat"
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
 
+    # LLM 调用超时与重试
+    # LLM_TIMEOUT：单次请求最长等待时间（秒）。不设置会导致 ainvoke 可能无限挂起，
+    #   使整场面试卡在「出题/评估」步骤。由 ChatOpenAI(timeout=...) 生效。
+    LLM_TIMEOUT: float = 60.0
+    # LLM_MAX_RETRIES：底层 openai SDK 对连接错误 / 限流(429) / 5xx 的自动重试次数。
+    LLM_MAX_RETRIES: int = 2
+    # LLM_CALL_RETRIES：调用层对「超时 / 不可达」的额外重试次数（仅重试偶发故障）。
+    #   重试耗尽后仍失败，则让异常上抛，由 agent 的兜底逻辑（题库原题 / 固定安全题）处理，
+    #   而非静默返回错误结果。
+    LLM_CALL_RETRIES: int = 1
+
     OPENAI_API_KEY: Optional[str] = None
     EMBEDDING_MODEL: str = "text-embedding-v3"
     EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

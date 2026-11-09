@@ -1,6 +1,6 @@
 # InterviewAI · AI 面试模拟 Agent
 
-基于 **LLM + Agent + LangGraph + LangChain** 的 AI 面试模拟系统，由三个各司其职的 Agent 协同工作：**面试官 Agent** 根据岗位/简历/历史问答动态生成面试题，**评估官 Agent** 对每轮回答评分点评，**能力评估 Agent** 在面试结束后做多维度能力总结。系统同时提供 REST 与 SSE 两套接口，并支持通过 MCP 协议**对外暴露能力**与**接入外部工具**。
+基于 **LLM + Agent + LangGraph + LangChain** 的 AI 面试模拟系统，由三个各司其职的 Agent 协同工作：**面试官 Agent** 根据岗位/简历/历史问答动态生成面试题，**评估官 Agent** 对每轮回答评分点评，**能力评估 Agent** 在面试结束后做多维度能力总结。三个 Agent 由统一编排层 `app/orchestrator/` 调度，系统同时提供 REST 与 SSE 两套接口，并支持通过 MCP 协议**对外暴露能力**与**接入外部工具**。
 
 ## 技术栈
 
@@ -13,6 +13,7 @@
 | RAG / 向量库 | ChromaDB + 百炼 text-embedding-v3（混合检索：BM25 + 稠密向量 + RRF 融合） |
 | 工具协议 | MCP（FastMCP，双向：消费外部工具 / 暴露自身能力） |
 | 前端 | Vue 3 · TypeScript · Pinia · Arco Design Vue |
+| 测试 | pytest（编排层全链路 / 三入口一致性 / LLM 超时重试） |
 | 部署 | Docker Compose |
 
 ## 项目结构
@@ -31,12 +32,15 @@
 │   │   │   ├── skill_assessor/ # 能力评估 Agent（多维度总结，LangGraph StateGraph）
 │   │   │   ├── tools/          # 工具集：runner(ReAct 引擎)、question/resume/rubric/code 工具、sandbox_guard
 │   │   │   └── mcp/            # MCP 适配器：client(消费外部工具) / server(暴露自身能力)
-│   │   ├── llm/              # DeepSeek/OpenAI 客户端（function_calling 兼容）
+│   │   ├── llm/              # DeepSeek/OpenAI 客户端（function_calling 兼容、超时与重试）
 │   │   ├── rag/              # ChromaDB 向量库 + 混合检索 + embedding 缓存
+│   │   ├── orchestrator/     # 统一编排层：service(InterviewOrchestrator) / contracts / errors / report
 │   │   ├── cache.py          # Redis 缓存封装（面试历史，优雅降级）
 │   │   ├── models/types.py   # JSONB 类型（PG jsonb / SQLite json）
-│   │   └── api/              # auth / resume / interview / stream / questions / users / websocket 路由
+│   │   └── api/              # HTTP 适配层：auth / resume / interview / stream / questions / users / websocket
 │   ├── mcp_server.py      # 本系统作为 MCP Server 的启动入口（FastMCP，stdio）
+│   ├── tests/             # pytest 测试（编排层 / 入口一致性 / LLM 超时重试）
+│   ├── pytest.ini
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── frontend/           # Vue 3 前端（靛蓝浅色主题，含落地页 Landing）
@@ -50,7 +54,7 @@
 
 ## 三个 Agent 如何协作
 
-系统由三个各司其职的 Agent 组成，由 API 层（`app/api/interview.py` + `app/api/stream.py`）按**确定性流程编排**调用（普通 Python 轮次循环，而非由一个"总 Agent"调度，也不依赖 LangGraph 编排）：
+系统由三个各司其职的 Agent 组成，由**统一编排层** `app/orchestrator/service.py` 中的 `InterviewOrchestrator` 按**确定性流程**调度（普通 Python 轮次循环，而非由一个"总 Agent"调度，也不依赖 LangGraph 编排）。REST（`api/interview.py`）、SSE（`api/stream.py`）、MCP（`mcp/server.py`）三个入口只做参数校验、协议适配与异常转换，不再各自实现一遍编排逻辑：
 
 | Agent | 职责 | 调用时机 | 产出 | 内部实现 |
 |---|---|---|---|---|
@@ -58,11 +62,31 @@
 | 评估官 Agent（evaluator） | 对单轮回答评分（0-100），给出优点/不足/建议/参考回答；评分前必先调 `get_rubric` 取客观依据，可选开代码沙箱 | 每轮提交回答后 | 分数 + 点评 | **手写 ReAct**（同上） |
 | 能力评估 Agent（skill_assessor） | 综合整场问答做 7 维能力评分 + 总结 + 反馈 | 最后一轮结束后（一次性） | 7 维能力分 + 总结 + 建议 | **LangGraph `StateGraph`**（单节点 `assess → END`） |
 
-> **关于 LangGraph 的说明**：三个 Agent 之间并未用 LangGraph 编排，编排由普通控制流完成；LangGraph 仅用于「能力评估 Agent」这一个 Agent 的内部（把它包成单节点状态图）。面试官/评估官借用了 LangChain 的 `bind_tools` 等原语，但工具循环是手写的（`agent/tools/runner.py`），不依赖 LangGraph 执行引擎——这样对结构化输出与失败兜底更可控。
+> **关于 LangGraph 的说明**：三个 Agent 之间并未用 LangGraph 编排，编排由普通控制流完成（集中在 `app/orchestrator/service.py`）；LangGraph 仅用于「能力评估 Agent」这一个 Agent 的内部（把它包成单节点状态图）。面试官/评估官借用了 LangChain 的 `bind_tools` 等原语，但工具循环是手写的（`agent/tools/runner.py`），不依赖 LangGraph 执行引擎——这样对结构化输出与失败兜底更可控。编排层刻意不引入图编排 / checkpointer：每轮是一次独立 HTTP 请求，跨请求状态必须以数据库为事实来源（Redis 只做历史缓存）。
 
 7 个评估维度：技术能力、沟通表达、问题解决、领导力、团队协作、学习能力、抗压能力。
 
-每轮流程：面试官出题 → 用户作答 → 评估官评分 →（未结束则）面试官带历史上下文出下一题；最后一轮结束后，能力评估 Agent 生成整场报告。能力评估 Agent 的 `SkillAssessorState` 等共享状态对象全局复用、每次请求实例化独立状态，避免并发会话状态互相覆盖。
+每轮流程：面试官出题 → 用户作答 → 评估官评分 →（未结束则）面试官带历史上下文出下一题；最后一轮结束后，能力评估 Agent 生成整场报告。编排器把「评分 → 写库 → flush → 轮次判断 → 出下一题 → 收尾能力评估」收敛为一条链路，并用 Pydantic 契约（`contracts.py`：`StartParams` / `Turn` / `QuestionOut` / `EvaluationOut` / `StepResult`）传值、统一异常（`errors.py` 的 `OrchestrationError` 子类）表达流程校验；REST 转成 HTTP 状态码，MCP 转成 `{"error": ...}`。能力评估 Agent 的 `SkillAssessorState` 等共享状态对象每次请求实例化独立状态，避免并发会话状态互相覆盖。
+
+## 统一编排层与测试
+
+重构前「评分 → 写库 → flush → 轮次判断 → 出下一题 → 收尾能力评估」这套编排在 REST、SSE、MCP 三个入口各写了一遍，MCP 甚至需要反向 `import` 接口层的私有函数才能复用收尾逻辑，改一处要同步三处。现在收归 `app/orchestrator/`：
+
+| 文件 | 职责 |
+|---|---|
+| `service.py` | `InterviewOrchestrator`：`start` / `answer_and_advance` / `load_history` / `run_skill_assessment` / `commit` / 广播事件 |
+| `contracts.py` | Pydantic 契约与开始参数校验，字段写错立即报错 |
+| `errors.py` | 流程异常（无效 ID / 404 / 403 / 无待答题 / 已作答），三个入口共用同一套语义与提示语 |
+| `report.py` | 报告数据组装（保留旧导入路径可用） |
+
+接口层只保留 HTTP / MCP 协议适配：`api/interview.py`、`api/stream.py` 与 `mcp/server.py` 调用同一个编排器，因此 REST 与 SSE 共用同一套出题/评估逻辑，避免双份提示词漂移。
+
+**测试**：`backend/tests/` 覆盖编排层全链路（开始、中途推进、终局能力评估、历史契约、评分失败不污染均分、分数夹值、缓存失效、广播事件顺序）、三个入口的一致性与错误映射、以及 LLM 超时与重试（重试成功 / 耗尽上抛 / ReAct 重试 / 结构化输出兜底）。运行方式：
+
+```bash
+cd backend
+python -m pytest -q
+```
 
 ## MCP 工具调用（双向）
 
@@ -80,6 +104,7 @@
      - `evaluate_answer` 评估回答并返回结构化评分
      - `generate_next_question` 生成下一道题（纯生成，不落库）
      - `start_interview` 开始一场面试并返回首题
+   - 流程类工具（`start_interview` 等）同样调用 `InterviewOrchestrator`，不再反向依赖 API 层私有函数。
    - 启动方式（在 `backend` 目录下）：`python mcp_server.py`，首次启动会建表、预置题库并建立向量索引。
 
 ## 流式面试（SSE）
@@ -89,7 +114,7 @@
 - `POST /api/v1/stream/start`：开始面试，逐 token 推送首题（首行带 `【题型】` 标记）。
 - `POST /api/v1/stream/answer`：提交回答，逐 token 推送评估（带 `【得分】…【参考回答】` 等标记）。
 
-REST 与 SSE 两套端点**共用同一批 Agent 实现**，避免提示词漂移。SSE 模式下 WebSocket 仍真实可用，关键节点会广播 `started / evaluating / evaluated / completed` 事件。
+REST、SSE 与 MCP 三个入口**共用同一个 `InterviewOrchestrator` 与同一批 Agent 实现**，避免提示词漂移。SSE 模式下 WebSocket 仍真实可用，关键节点会广播 `started / evaluating / evaluated / completed` 事件。
 
 ## 部署方式
 
@@ -149,6 +174,9 @@ npm run dev
 | `MCP_SERVER_URLS` | 外部 MCP Server（SSE）地址列表，留空则不加载外部工具 |
 | `MCP_DEFAULT_USER_EMAIL` | MCP Server 自动创建服务账号时使用的邮箱（可选） |
 | `ENABLE_CODE_TOOLS` | 是否开启「代码执行」工具（评估官沙箱），默认 `False`，需隔离环境才建议开启 |
+| `LLM_TIMEOUT` | 单次 LLM 请求超时（秒），默认 `60`，防止 `ainvoke` 无限挂起卡住整场面试 |
+| `LLM_MAX_RETRIES` | SDK 层对连接错误 / 429 / 5xx 的自动重试次数，默认 `2` |
+| `LLM_CALL_RETRIES` | 调用层对「超时 / 不可达」的额外重试次数，默认 `1`；耗尽后异常上抛，由 Agent 兜底逻辑处理（题库原题 / `score=None`），不静默返回错误结果 |
 
 ## 核心 API
 

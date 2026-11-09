@@ -26,11 +26,12 @@ from app.agent.evaluator.graph import run_evaluator_agent
 from app.agent.interviewer.graph import run_interviewer_agent
 from app.agent.tools.question_tools import search_questions
 from app.agent.tools.rubric_tools import get_rubric
-from app.api.interview import _run_skill_assessment, _update_overall, build_report_data
 from app.config import settings
 from app.database import AsyncSessionLocal, init_db
-from app.models.interview import Interview, QAPair
 from app.models.user import User
+from app.orchestrator.errors import OrchestrationError
+from app.orchestrator.report import build_report_data
+from app.orchestrator.service import InterviewOrchestrator
 from app.rag.indexing import ensure_question_index, seed_question_bank
 
 logger = logging.getLogger(__name__)
@@ -156,40 +157,18 @@ async def start_interview(
     total_rounds = max(1, min(10, int(total_rounds)))
     async with AsyncSessionLocal() as db:
         user = await _resolve_user(db, user_email)
-        interview = Interview(
+        # 与 REST /start 共用同一套编排（MCP 侧无简历上下文、不广播 WebSocket 事件）
+        result = await InterviewOrchestrator(db).start(
             user_id=user.id,
             interview_type=interview_type,
             position_name=position_name,
             difficulty_level=difficulty_level,
             total_rounds=total_rounds,
-            current_round=1,
-            status="ongoing",
         )
-        db.add(interview)
-        await db.flush()
-        result = await run_interviewer_agent(
-            interview_id=str(interview.id),
-            user_id=str(user.id),
-            interview_type=interview_type,
-            position_name=position_name,
-            difficulty_level=difficulty_level,
-            current_round=1,
-            total_rounds=total_rounds,
-            history=[],
-            context="",
-        )
-        qa = QAPair(
-            interview_id=interview.id,
-            question_number=1,
-            question_type=result.get("question_type"),
-            question_content=result.get("current_question", ""),
-        )
-        db.add(qa)
-        await db.commit()
         return {
-            "interview_id": str(interview.id),
-            "question": result.get("current_question"),
-            "question_type": result.get("question_type"),
+            "interview_id": str(result.interview.id),
+            "question": result.question.question,
+            "question_type": result.question.question_type,
             "current_round": 1,
             "total_rounds": total_rounds,
         }
@@ -204,83 +183,13 @@ async def submit_interview_answer(interview_id: str, answer: str, user_email: st
         answer: 候选人对当前问题的回答。
         user_email: 候选人邮箱（用于校验归属，可选）。
     """
-    try:
-        iid = uuid.UUID(interview_id)
-    except ValueError:
-        return {"error": "无效的 interview_id"}
-
     async with AsyncSessionLocal() as db:
-        interview = (await db.execute(select(Interview).where(Interview.id == iid))).scalar_one_or_none()
-        if interview is None:
-            return {"error": "面试不存在"}
-
-        qa_result = await db.execute(
-            select(QAPair).where(QAPair.interview_id == iid).order_by(QAPair.question_number.desc()).limit(1)
-        )
-        qa = qa_result.scalar_one_or_none()
-        if qa is None or qa.answer_content:
-            return {"error": "当前没有待回答的问题"}
-
-        evaluation = await run_evaluator_agent(qa.question_content or "", qa.question_type or "behavioral", answer)
-        qa.answer_content = answer
-        qa.score = evaluation.get("score")
-        qa.strengths = evaluation.get("strengths") or []
-        qa.weaknesses = evaluation.get("weaknesses") or []
-        qa.suggestions = evaluation.get("suggestions") or []
-        qa.model_answer = evaluation.get("model_answer")
-        await db.flush()
-
-        completed = False
-        next_question = None
-        if qa.question_number >= interview.total_rounds:
-            interview.status = "completed"
-            completed = True
-            await _update_overall(db, interview)
-            await _run_skill_assessment(db, interview)
-        else:
-            hist_res = await db.execute(
-                select(QAPair).where(QAPair.interview_id == iid).order_by(QAPair.question_number)
-            )
-            history = [
-                {
-                    "round": p.question_number,
-                    "question": p.question_content,
-                    "answer": p.answer_content,
-                    "question_type": p.question_type,
-                    "score": p.score,
-                }
-                for p in hist_res.scalars().all()
-                if p.answer_content
-            ]
-            result = await run_interviewer_agent(
-                interview_id=str(iid),
-                user_id=str(interview.user_id),
-                interview_type=interview.interview_type,
-                position_name=interview.position_name,
-                difficulty_level=interview.difficulty_level,
-                current_round=qa.question_number + 1,
-                total_rounds=interview.total_rounds,
-                history=history,
-                context="",
-            )
-            nq = QAPair(
-                interview_id=iid,
-                question_number=qa.question_number + 1,
-                question_type=result.get("question_type"),
-                question_content=result.get("current_question", ""),
-            )
-            db.add(nq)
-            interview.current_round = qa.question_number + 1
-            next_question = result.get("current_question")
-
-        await db.commit()
-        return {
-            "evaluation": evaluation,
-            "completed": completed,
-            "current_round": interview.current_round,
-            "total_rounds": interview.total_rounds,
-            "next_question": next_question,
-        }
+        # 与 REST /{id}/answer 共用同一套编排；MCP 侧无简历上下文、不广播 WebSocket 事件
+        try:
+            result = await InterviewOrchestrator(db).answer_and_advance(interview_id, answer, context="")
+        except OrchestrationError as e:
+            return {"error": e.message}
+        return result.to_api_dict()
 
 
 @mcp.tool()

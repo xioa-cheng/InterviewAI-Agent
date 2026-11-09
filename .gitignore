@@ -16,6 +16,11 @@ node_modules/
 dist/
 *.local
 
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
 # IDE
 .idea/
 .vscode/

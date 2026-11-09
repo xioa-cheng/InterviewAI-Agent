@@ -10,6 +10,9 @@
 2. 若模型要求调用工具，则逐个执行（异步），把结果以 ToolMessage 回填后再次推理；
 3. 直到模型不再请求工具（或达到最大轮次）；
 4. 若有 schema，则再做一次 with_structured_output 调用，从完整上下文抽取结构化对象。
+
+每次 LLM 调用都经 _ainvoke_with_timeout_retry 包裹（见 app.llm.client），
+在「超时 / 不可达」时做有限重试；重试仍失败则异常上抛，由 agent 兜底逻辑处理。
 """
 import logging
 from typing import List, Optional, Type
@@ -17,7 +20,8 @@ from typing import List, Optional, Type
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
-from app.llm.client import get_llm_client
+from app.config import settings
+from app.llm.client import get_llm_client, _ainvoke_with_timeout_retry
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +52,7 @@ async def run_react(
     tool_map = {t.name: t for t in tools}
 
     for _ in range(max_iterations):
-        resp = await bound.ainvoke(messages)
+        resp = await _ainvoke_with_timeout_retry(bound, messages, settings.LLM_CALL_RETRIES)
         messages.append(resp)
 
         tool_calls = getattr(resp, "tool_calls", None)
@@ -74,7 +78,7 @@ async def run_react(
         # 但不支持 json_schema 类型的 response_format（会返回 400）。function_calling 走工具调用，
         # 兼容性最好，且能继续约束输出结构。
         structured = model.with_structured_output(schema, method="function_calling")
-        final = await structured.ainvoke(messages)
+        final = await _ainvoke_with_timeout_retry(structured, messages, settings.LLM_CALL_RETRIES)
         return final.model_dump() if hasattr(final, "model_dump") else dict(final)
 
     return getattr(messages[-1], "content", "")
@@ -102,7 +106,7 @@ async def run_react_stream(
     tool_map = {t.name: t for t in tools}
 
     for _ in range(max_iterations):
-        resp = await bound.ainvoke(messages)
+        resp = await _ainvoke_with_timeout_retry(bound, messages, settings.LLM_CALL_RETRIES)
         messages.append(resp)
 
         tool_calls = getattr(resp, "tool_calls", None)
