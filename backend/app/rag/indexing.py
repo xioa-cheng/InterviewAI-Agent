@@ -178,15 +178,14 @@ async def ensure_question_index() -> int:
 
 
 async def reindex_all() -> int:
-    """强制重建索引：清空集合后全量写入（供运行时加题/修正后手动调用）。"""
+    """强制重建索引：全量重嵌后替换集合（供运行时加题/修正后手动调用）。
+
+    顺序上先算完向量再清空集合：嵌入接口失败时保留现有索引，避免「集合已删、
+    一条都没写回」导致稠密召回整条链路失效。返回实际写入的向量条数，
+    0 表示题库为空或重建失败。
+    """
     store = get_vector_store()
     if not store:
-        return 0
-    try:
-        store.delete_collection(COLLECTION)
-        collection = store.get_or_create_collection(COLLECTION)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"重建向量索引失败: {e}")
         return 0
 
     async with AsyncSessionLocal() as db:
@@ -197,25 +196,39 @@ async def reindex_all() -> int:
         ids = list(by_id.keys())
         documents = [_doc_text(r) for r in by_id.values()]
         metadatas = [_meta(r) for r in by_id.values()]
+        hashes = {rid: _content_hash(r) for rid, r in by_id.items()}
 
+    # 先向量化：失败时不碰现有集合，索引保持可用
     embeddings = await asyncio.to_thread(embed_texts, documents)
-    if not embeddings:
-        logger.warning("题目向量化失败，跳过重建")
+    if not embeddings or len(embeddings) != len(documents):
+        logger.warning("题目向量化失败或向量条数不符，跳过重建（现有索引保持不变）")
         return 0
+
+    try:
+        # 空库（首次部署或集合被手动删除）时 delete_collection 会抛 not exist；
+        # 先 get_or_create 兜一下，保证重建端点在任何初始状态下都可用。
+        store.get_or_create_collection(COLLECTION)
+        store.delete_collection(COLLECTION)
         await asyncio.to_thread(upsert_embeddings, COLLECTION, ids, documents, embeddings, metadatas)
+        count = store.get_or_create_collection(COLLECTION).count()
+        if count != len(ids):
+            logger.warning(f"重建后向量条数不符：期望 {len(ids)}，实际 {count}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"重建向量索引失败: {e}")
+        return 0
 
     # 同步回写所有题目的 content_hash
     async with AsyncSessionLocal() as db:
-        for rid, r in by_id.items():
+        for rid, h in hashes.items():
             obj = await db.get(QuestionBank, uuid.UUID(rid))
             if obj:
-                obj.content_hash = _content_hash(r)
+                obj.content_hash = h
         await db.commit()
 
     # 题库整体已变：刷新检索侧题目缓存，确保出题/评分依据立即反映新内容
     _invalidate_retrieval_cache()
-    logger.info(f"向量索引已重建 {len(documents)} 条")
-    return len(documents)
+    logger.info(f"向量索引已重建 {count} 条")
+    return count
 
 
 async def index_single_question(qid: uuid.UUID) -> bool:
